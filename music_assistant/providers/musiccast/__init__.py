@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp.client_exceptions import (
     ClientError,
+    ClientOSError,
     ServerDisconnectedError,
 )
 from aiomusiccast.exceptions import MusicCastGroupException
@@ -738,7 +739,7 @@ class MusicCast(PlayerProvider):
                 _xml_media_info = await avt_get_media_info(
                     self.mass.http_session, device.physical_device
                 )
-            except ServerDisconnectedError:
+            except (ServerDisconnectedError, ClientOSError):
                 return
             _player_current_url = search_xml(_xml_media_info, "CurrentURI")
 
