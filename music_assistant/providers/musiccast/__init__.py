@@ -618,8 +618,9 @@ class MusicCast(PlayerProvider):
 
         def get_player(zone_name: str, player_name: str) -> Player:
             # player features
-            # TODO: There is seek in the upnp desc
-            # http://{ip}:49154/AVTransport/desc.xml
+            # seek does not work, despite being supported according to
+            # http://{ip}:49154/AVTransport/desc.xml - no error is returned
+            # other upnp controller don't succeed either
             supported_features: set[PlayerFeature] = {
                 PlayerFeature.VOLUME_SET,
                 PlayerFeature.VOLUME_MUTE,
