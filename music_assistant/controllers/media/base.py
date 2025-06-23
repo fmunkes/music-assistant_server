@@ -83,7 +83,7 @@ class MediaControllerBase(Generic[ItemCls], metaclass=ABCMeta):
     """Base model for controller managing a MediaType."""
 
     media_type: MediaType
-    item_cls: ItemCls
+    item_cls: type[MediaItemType]
     db_table: str
 
     def __init__(self, mass: MusicAssistant) -> None:
@@ -581,7 +581,7 @@ class MediaControllerBase(Generic[ItemCls], metaclass=ABCMeta):
         fallback = fallback or await self.get_library_item_by_prov_id(
             item_id, provider_instance_id_or_domain
         )
-        if fallback and not (isinstance(fallback, ItemMapping) and self.item_cls in (Track, Album)):  # type: ignore[comparison-overlap]
+        if fallback and not (isinstance(fallback, ItemMapping) and self.item_cls in (Track, Album)):
             # simply return the fallback item
             # NOTE: we only accept ItemMapping as fallback for flat items
             # so not for tracks and albums (which rely on other objects)
