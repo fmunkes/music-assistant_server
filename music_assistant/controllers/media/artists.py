@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from music_assistant_models.enums import AlbumType, MediaType, ProviderFeature
 from music_assistant_models.errors import (
@@ -27,9 +27,8 @@ from music_assistant.constants import (
 from music_assistant.controllers.media.base import MediaControllerBase
 from music_assistant.helpers.compare import compare_artist, compare_strings, create_safe_string
 from music_assistant.helpers.json import serialize_to_json
-
-if TYPE_CHECKING:
-    from music_assistant.models.music_provider import MusicProvider
+from music_assistant.mass import MusicAssistant
+from music_assistant.models.music_provider import MusicProvider
 
 
 class ArtistsController(MediaControllerBase[Artist]):
@@ -39,9 +38,9 @@ class ArtistsController(MediaControllerBase[Artist]):
     media_type = MediaType.ARTIST
     item_cls = Artist
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, mass: MusicAssistant) -> None:
         """Initialize class."""
-        super().__init__(*args, **kwargs)
+        super().__init__(mass)
         self._db_add_lock = asyncio.Lock()
         # register (extra) api handlers
         api_base = self.api_base
@@ -63,6 +62,7 @@ class ArtistsController(MediaControllerBase[Artist]):
             )
         if query_parts:
             sql_query += f" WHERE {' AND '.join(query_parts)}"
+        assert self.mass.music.database is not None  # for type checking
         return await self.mass.music.database.get_count_from_query(sql_query)
 
     async def library_items(
@@ -78,7 +78,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         album_artists_only: bool = False,
     ) -> list[Artist]:
         """Get in-database (album) artists."""
-        extra_query_params: dict[str, Any] = extra_query_params or {}
+        extra_query_params = extra_query_params or {}
         extra_query_parts: list[str] = [extra_query] if extra_query else []
         if album_artists_only:
             extra_query_parts.append(
@@ -108,7 +108,9 @@ class ArtistsController(MediaControllerBase[Artist]):
             item_id, provider_instance_id_or_domain
         )
         if not library_artist:
-            return await self.get_provider_artist_toptracks(item_id, provider_instance_id_or_domain)
+            return UniqueList(
+                await self.get_provider_artist_toptracks(item_id, provider_instance_id_or_domain)
+            )
         db_items = await self.get_library_artist_tracks(library_artist.item_id)
         result: UniqueList[Track] = UniqueList(db_items)
         if in_library_only:
@@ -146,7 +148,9 @@ class ArtistsController(MediaControllerBase[Artist]):
             item_id, provider_instance_id_or_domain
         )
         if not library_artist:
-            return await self.get_provider_artist_albums(item_id, provider_instance_id_or_domain)
+            return UniqueList(
+                await self.get_provider_artist_albums(item_id, provider_instance_id_or_domain)
+            )
         db_items = await self.get_library_artist_albums(library_artist.item_id)
         result: UniqueList[Album] = UniqueList(db_items)
         if in_library_only:
@@ -175,6 +179,8 @@ class ArtistsController(MediaControllerBase[Artist]):
     async def remove_item_from_library(self, item_id: str | int, recursive: bool = True) -> None:
         """Delete record from the database."""
         db_id = int(item_id)  # ensure integer
+
+        assert self.mass.music.database is not None  # for type checking
 
         # recursively also remove artist albums
         for db_row in await self.mass.music.database.get_rows_from_query(
@@ -207,15 +213,16 @@ class ArtistsController(MediaControllerBase[Artist]):
         """Return top tracks for an artist on given provider."""
         items = []
         assert provider_instance_id_or_domain != "library"
-        prov = self.mass.get_provider(provider_instance_id_or_domain)
-        if prov is None:
+        music_provider = self.mass.get_provider(provider_instance_id_or_domain)
+        if music_provider is None:
             return []
+        assert isinstance(music_provider, MusicProvider)  # for type checking
         # prefer cache items (if any) - for streaming providers
         cache_category = CACHE_CATEGORY_MUSIC_ARTIST_TRACKS
-        cache_base_key = prov.lookup_key
+        cache_base_key = music_provider.lookup_key
         cache_key = item_id
         if (
-            prov.is_streaming_provider
+            music_provider.is_streaming_provider
             and (
                 cache := await self.mass.cache.get(
                     cache_key, category=cache_category, base_key=cache_base_key
@@ -225,17 +232,22 @@ class ArtistsController(MediaControllerBase[Artist]):
         ):
             return [Track.from_dict(x) for x in cache]
         # no items in cache - get listing from provider
-        if ProviderFeature.ARTIST_TOPTRACKS in prov.supported_features:
-            items = await prov.get_artist_toptracks(item_id)
+        if ProviderFeature.ARTIST_TOPTRACKS in music_provider.supported_features:
+            items = await music_provider.get_artist_toptracks(item_id)
             for item in items:
                 # if this is a complete track object, pre-cache it as
                 # that will save us an (expensive) lookup later
-                if item.image and item.artist_str and item.album and prov.domain != "builtin":
+                if (
+                    item.image
+                    and item.artist_str
+                    and item.album
+                    and music_provider.domain != "builtin"
+                ):
                     await self.mass.cache.set(
                         f"track.{item_id}",
                         item.to_dict(),
                         category=CACHE_CATEGORY_MUSIC_PROVIDER_ITEM,
-                        base_key=prov.lookup_key,
+                        base_key=music_provider.lookup_key,
                     )
         else:
             # fallback implementation using the db
@@ -252,7 +264,7 @@ class ArtistsController(MediaControllerBase[Artist]):
                     extra_query_parts=[query], provider=provider_instance_id_or_domain
                 )
         # store (serializable items) in cache
-        if prov.is_streaming_provider:
+        if music_provider.is_streaming_provider:
             self.mass.create_task(
                 self.mass.cache.set(
                     cache_key,
@@ -278,17 +290,18 @@ class ArtistsController(MediaControllerBase[Artist]):
         provider_instance_id_or_domain: str,
     ) -> list[Album]:
         """Return albums for an artist on given provider."""
-        items = []
+        items: list[Album] = []
         assert provider_instance_id_or_domain != "library"
-        prov = self.mass.get_provider(provider_instance_id_or_domain)
-        if prov is None:
+        music_provider = self.mass.get_provider(provider_instance_id_or_domain)
+        if music_provider is None:
             return []
+        assert isinstance(music_provider, MusicProvider)  # for type checking
         # prefer cache items (if any)
         cache_category = CACHE_CATEGORY_MUSIC_ARTIST_ALBUMS
-        cache_base_key = prov.lookup_key
+        cache_base_key = music_provider.lookup_key
         cache_key = item_id
         if (
-            prov.is_streaming_provider
+            music_provider.is_streaming_provider
             and (
                 cache := await self.mass.cache.get(
                     cache_key, category=cache_category, base_key=cache_base_key
@@ -298,8 +311,8 @@ class ArtistsController(MediaControllerBase[Artist]):
         ):
             return [Album.from_dict(x) for x in cache]
         # no items in cache - get listing from provider
-        if ProviderFeature.ARTIST_ALBUMS in prov.supported_features:
-            items = await prov.get_artist_albums(item_id)
+        if ProviderFeature.ARTIST_ALBUMS in music_provider.supported_features:
+            items = await music_provider.get_artist_albums(item_id)
         else:
             # fallback implementation using the db
             # ruff: noqa: PLR5501
@@ -317,7 +330,7 @@ class ArtistsController(MediaControllerBase[Artist]):
                 )
 
         # store (serializable items) in cache
-        if prov.is_streaming_provider:
+        if music_provider.is_streaming_provider:
             self.mass.create_task(
                 self.mass.cache.set(
                     cache_key,
@@ -337,8 +350,12 @@ class ArtistsController(MediaControllerBase[Artist]):
         query = f"albums.item_id in ({subquery})"
         return await self.mass.music.albums._get_library_items_by_query(extra_query_parts=[query])
 
-    async def _add_library_item(self, item: Artist | ItemMapping) -> int:
-        """Add a new item record to the database."""
+    # async def _add_library_item(self, item: Artist | ItemMapping) -> int:
+    async def _add_library_item(self, item: Artist, overwrite_existing: bool = False) -> int:
+        """Add a new item record to the database.
+
+        Overwrite is not used here.
+        """
         if isinstance(item, ItemMapping):
             item = self.artist_from_item_mapping(item)
         # enforce various artists name + id
@@ -346,7 +363,10 @@ class ArtistsController(MediaControllerBase[Artist]):
             item.mbid = VARIOUS_ARTISTS_MBID
         if item.mbid == VARIOUS_ARTISTS_MBID:
             item.name = VARIOUS_ARTISTS_NAME
+
         # no existing item matched: insert item
+        assert self.mass.music.database is not None  # for type checking
+        assert item.sort_name is not None  # for type checking
         db_id = await self.mass.music.database.insert(
             self.db_table,
             {
@@ -388,6 +408,8 @@ class ArtistsController(MediaControllerBase[Artist]):
 
         name = update.name if overwrite else cur_item.name
         sort_name = update.sort_name if overwrite else cur_item.sort_name or update.sort_name
+        assert self.mass.music.database is not None  # for type checking
+        assert sort_name is not None  # for type checking
         await self.mass.music.database.update(
             self.db_table,
             {"item_id": db_id},
@@ -424,13 +446,13 @@ class ArtistsController(MediaControllerBase[Artist]):
             in_library_only=False,
         )
 
-    async def match_providers(self, db_artist: Artist) -> None:
+    async def match_providers(self, db_item: Artist) -> None:
         """Try to find matching artists on all providers for the provided (database) item_id.
 
         This is used to link objects of different providers together.
         """
-        assert db_artist.provider == "library", "Matching only supported for database items!"
-        cur_provider_domains = {x.provider_domain for x in db_artist.provider_mappings}
+        assert db_item.provider == "library", "Matching only supported for database items!"
+        cur_provider_domains = {x.provider_domain for x in db_item.provider_mappings}
         for provider in self.mass.music.providers:
             if provider.domain in cur_provider_domains:
                 continue
@@ -441,12 +463,12 @@ class ArtistsController(MediaControllerBase[Artist]):
             if not provider.is_streaming_provider:
                 # matching on unique providers is pointless as they push (all) their content to MA
                 continue
-            if await self._match_provider(db_artist, provider):
+            if await self._match_provider(db_item, provider):
                 cur_provider_domains.add(provider.domain)
             else:
                 self.logger.debug(
                     "Could not find match for Artist %s on provider %s",
-                    db_artist.name,
+                    db_item.name,
                     provider.name,
                 )
 
